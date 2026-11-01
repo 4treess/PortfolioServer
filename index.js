@@ -30,6 +30,93 @@ const client = new MongoClient(process.env.MONGO_URI);
 const dbName = 'amie_babie';
 
 const gameRooms = {};
+const matchingPairsRooms = new Map();
+
+const matchingPairsRoomKey = (roomID) => roomID.trim().toLowerCase();
+
+const matchingPairsRoomSnapshot = (room) => ({
+  roomID: room.roomID,
+  rows: room.rows,
+  cols: room.cols,
+  state: room.state,
+  gameId: room.gameId,
+  players: Object.fromEntries(
+    Object.entries(room.players).map(([playerID, player]) => [
+      playerID,
+      {
+        nickname: player.nickname,
+        powerUp: player.powerUp,
+        status: player.status,
+        score: player.score
+      }
+    ])
+  )
+});
+
+const broadcastMatchingPairsRoom = (room) => {
+  io.to(room.socketRoom).emit('matchingPairs:roomUpdate', matchingPairsRoomSnapshot(room));
+};
+
+const completeMatchingPairsGame = (room) => {
+  room.state = 'Lobby';
+  const snapshot = matchingPairsRoomSnapshot(room);
+  io.to(room.socketRoom).emit('matchingPairs:roomUpdate', snapshot);
+  io.to(room.socketRoom).emit('matchingPairs:gameComplete', snapshot);
+};
+
+const isValidMatchingPairsGrid = (rows, cols) =>
+  Number.isInteger(rows) &&
+  Number.isInteger(cols) &&
+  rows >= 2 &&
+  cols >= 2 &&
+  rows <= 12 &&
+  cols <= 12 &&
+  rows * cols <= 144 &&
+  (rows * cols) % 2 === 0;
+
+const normalizeMatchingPairsPowerUp = (powerUp) => {
+  if (!powerUp || powerUp.type === 'none') {
+    return { type: 'none', value: 0 };
+  }
+
+  if (powerUp.type === 'icon-variety') {
+    const value = Number(powerUp.value);
+    if (Number.isInteger(value) && value >= -12 && value <= 12) {
+      return { type: 'icon-variety', value };
+    }
+  }
+
+  if (powerUp.type === 'score-multiplier') {
+    const value = Number(powerUp.value);
+    if (Number.isInteger(value) && value >= 1 && value <= 5) {
+      return { type: 'score-multiplier', value };
+    }
+  }
+
+  return null;
+};
+
+const removeMatchingPairsPlayer = (socket, roomKey, playerID) => {
+  const room = matchingPairsRooms.get(roomKey);
+  const player = room?.players[playerID];
+  if (!room || !player || player.socketID !== socket.id) return;
+
+  delete room.players[playerID];
+  socket.leave(room.socketRoom);
+  socket.data.matchingPairsRoomKey = null;
+  socket.data.matchingPairsPlayerID = null;
+
+  if (Object.keys(room.players).length === 0) {
+    matchingPairsRooms.delete(roomKey);
+    return;
+  }
+
+  if (room.state === 'In Game' && Object.values(room.players).every((p) => p.status === 'Finished')) {
+    completeMatchingPairsGame(room);
+  } else {
+    broadcastMatchingPairsRoom(room);
+  }
+};
 
 io.on('connection', (socket) => {
   console.log(`${socket.id} connected`);
@@ -153,6 +240,218 @@ io.on('connection', (socket) => {
     if (gameRooms[roomID]?.players[playerID]) {
       gameRooms[roomID].players[playerID].score = 0;
       io.to(roomID).emit('room_status_update', gameRooms[roomID]);
+    }
+  });
+
+  socket.on('matchingPairs:joinRoom', (payload = {}, acknowledge) => {
+    const roomID = typeof payload.roomID === 'string' ? payload.roomID.trim() : '';
+    const playerID = typeof payload.playerID === 'string' ? payload.playerID.trim() : '';
+    const nickname = typeof payload.nickname === 'string' ? payload.nickname.trim() : '';
+    const powerUp = normalizeMatchingPairsPowerUp(payload.powerUp);
+
+    const fail = (message) => {
+      const response = { ok: false, error: message };
+      if (typeof acknowledge === 'function') acknowledge(response);
+      else socket.emit('matchingPairs:error', response);
+    };
+
+    if (!roomID || roomID.length > 64 || !playerID || playerID.length > 128 ||
+        !nickname || nickname.length > 32 || !powerUp) {
+      fail('Enter a room name and nickname, and choose a valid power-up.');
+      return;
+    }
+
+    const roomKey = matchingPairsRoomKey(roomID);
+    let room = matchingPairsRooms.get(roomKey);
+    const existingPlayer = room?.players[playerID];
+    if (room?.state === 'In Game' && !existingPlayer) {
+      fail('This room is already playing. Join again after the game is complete.');
+      return;
+    }
+
+    const previousRoomKey = socket.data.matchingPairsRoomKey;
+    const previousPlayerID = socket.data.matchingPairsPlayerID;
+    const isRejoiningSamePlayer = previousRoomKey === roomKey && previousPlayerID === playerID;
+    if (previousRoomKey && previousPlayerID && !isRejoiningSamePlayer) {
+      removeMatchingPairsPlayer(socket, previousRoomKey, previousPlayerID);
+      room = matchingPairsRooms.get(roomKey);
+    }
+
+    if (!room) {
+      room = {
+        roomID,
+        socketRoom: `matching-pairs:${roomKey}`,
+        rows: 5,
+        cols: 4,
+        state: 'Lobby',
+        gameId: 0,
+        players: {}
+      };
+      matchingPairsRooms.set(roomKey, room);
+    }
+
+    if (!room.players[playerID]) {
+      room.players[playerID] = {
+        nickname,
+        powerUp,
+        status: 'Lobby',
+        score: 0,
+        socketID: socket.id
+      };
+    } else {
+      room.players[playerID].nickname = nickname;
+      room.players[playerID].powerUp = powerUp;
+      room.players[playerID].socketID = socket.id;
+    }
+
+    socket.join(room.socketRoom);
+    socket.data.matchingPairsRoomKey = roomKey;
+    socket.data.matchingPairsPlayerID = playerID;
+
+    const snapshot = matchingPairsRoomSnapshot(room);
+    if (typeof acknowledge === 'function') acknowledge({ ok: true, room: snapshot });
+    io.to(room.socketRoom).emit('matchingPairs:roomUpdate', snapshot);
+  });
+
+  socket.on('matchingPairs:updateSettings', (payload = {}, acknowledge) => {
+    const roomID = typeof payload.roomID === 'string' ? payload.roomID.trim() : '';
+    const playerID = typeof payload.playerID === 'string' ? payload.playerID.trim() : '';
+    const roomKey = roomID ? matchingPairsRoomKey(roomID) : '';
+    const room = matchingPairsRooms.get(roomKey);
+    const player = room?.players[playerID];
+    const rows = Number(payload.rows);
+    const cols = Number(payload.cols);
+    const powerUp = normalizeMatchingPairsPowerUp(payload.powerUp);
+
+    const fail = (message) => {
+      const response = { ok: false, error: message };
+      if (typeof acknowledge === 'function') acknowledge(response);
+      else socket.emit('matchingPairs:error', response);
+    };
+
+    if (!room || !player || player.socketID !== socket.id ||
+        socket.data.matchingPairsRoomKey !== roomKey ||
+        socket.data.matchingPairsPlayerID !== playerID) {
+      fail('You are not a member of this Matching Pairs room.');
+      return;
+    }
+    if (room.state !== 'Lobby') {
+      fail('Room settings can only be changed in the lobby.');
+      return;
+    }
+    if (!isValidMatchingPairsGrid(rows, cols)) {
+      fail('Choose rows and columns between 2 and 12 with an even total number of cards.');
+      return;
+    }
+    if (!powerUp) {
+      fail('Choose a valid power-up.');
+      return;
+    }
+
+    room.rows = rows;
+    room.cols = cols;
+    player.powerUp = powerUp;
+
+    if (typeof acknowledge === 'function') acknowledge({ ok: true, room: matchingPairsRoomSnapshot(room) });
+    broadcastMatchingPairsRoom(room);
+  });
+
+  socket.on('matchingPairs:startGame', (payload = {}, acknowledge) => {
+    const roomID = typeof payload.roomID === 'string' ? payload.roomID.trim() : '';
+    const playerID = typeof payload.playerID === 'string' ? payload.playerID.trim() : '';
+    const roomKey = roomID ? matchingPairsRoomKey(roomID) : '';
+    const room = matchingPairsRooms.get(roomKey);
+    const player = room?.players[playerID];
+
+    const fail = (message) => {
+      const response = { ok: false, error: message };
+      if (typeof acknowledge === 'function') acknowledge(response);
+      else socket.emit('matchingPairs:error', response);
+    };
+
+    if (!room || !player || player.socketID !== socket.id ||
+        socket.data.matchingPairsRoomKey !== roomKey ||
+        socket.data.matchingPairsPlayerID !== playerID) {
+      fail('You are not a member of this Matching Pairs room.');
+      return;
+    }
+    if (room.state !== 'Lobby') {
+      fail('This room is already playing.');
+      return;
+    }
+    if (!isValidMatchingPairsGrid(room.rows, room.cols)) {
+      fail('Choose an even-sized grid before starting the game.');
+      return;
+    }
+
+    room.state = 'In Game';
+    room.gameId += 1;
+    Object.values(room.players).forEach((roomPlayer) => {
+      roomPlayer.status = 'In Game';
+      roomPlayer.score = 0;
+    });
+
+    const snapshot = matchingPairsRoomSnapshot(room);
+    if (typeof acknowledge === 'function') acknowledge({ ok: true, room: snapshot });
+    io.to(room.socketRoom).emit('matchingPairs:gameStarted', snapshot);
+    broadcastMatchingPairsRoom(room);
+  });
+
+  socket.on('matchingPairs:finishGame', (payload = {}, acknowledge) => {
+    const roomID = typeof payload.roomID === 'string' ? payload.roomID.trim() : '';
+    const playerID = typeof payload.playerID === 'string' ? payload.playerID.trim() : '';
+    const roomKey = roomID ? matchingPairsRoomKey(roomID) : '';
+    const room = matchingPairsRooms.get(roomKey);
+    const player = room?.players[playerID];
+    const score = Number(payload.score);
+    const gameId = Number(payload.gameId);
+
+    const fail = (message) => {
+      const response = { ok: false, error: message };
+      if (typeof acknowledge === 'function') acknowledge(response);
+      else socket.emit('matchingPairs:error', response);
+    };
+
+    if (!room || !player || player.socketID !== socket.id ||
+        socket.data.matchingPairsRoomKey !== roomKey ||
+        socket.data.matchingPairsPlayerID !== playerID) {
+      fail('You are not a member of this Matching Pairs room.');
+      return;
+    }
+    if (room.state !== 'In Game' || player.status !== 'In Game' || gameId !== room.gameId) {
+      fail('There is no active game for this player.');
+      return;
+    }
+    if (!Number.isFinite(score) || score < 0 || score > 1_000_000_000) {
+      fail('The final score must be a nonnegative finite number.');
+      return;
+    }
+
+    player.score = score;
+    player.status = 'Finished';
+    if (typeof acknowledge === 'function') acknowledge({ ok: true, room: matchingPairsRoomSnapshot(room) });
+
+    if (Object.values(room.players).every((roomPlayer) => roomPlayer.status === 'Finished')) {
+      completeMatchingPairsGame(room);
+    } else {
+      broadcastMatchingPairsRoom(room);
+    }
+  });
+
+  socket.on('matchingPairs:leaveRoom', (payload = {}, acknowledge) => {
+    const playerID = typeof payload.playerID === 'string' ? payload.playerID.trim() : '';
+    const roomKey = socket.data.matchingPairsRoomKey;
+    if (roomKey && playerID === socket.data.matchingPairsPlayerID) {
+      removeMatchingPairsPlayer(socket, roomKey, playerID);
+    }
+    if (typeof acknowledge === 'function') acknowledge({ ok: true });
+  });
+
+  socket.on('disconnect', () => {
+    const roomKey = socket.data.matchingPairsRoomKey;
+    const playerID = socket.data.matchingPairsPlayerID;
+    if (roomKey && playerID) {
+      removeMatchingPairsPlayer(socket, roomKey, playerID);
     }
   });
 });
