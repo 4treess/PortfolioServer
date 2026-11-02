@@ -118,11 +118,52 @@ const removeMatchingPairsPlayer = (socket, roomKey, playerID) => {
   }
 };
 
+const removeMinesPlayer = (socket, roomID, playerID) => {
+  const room = gameRooms[roomID];
+  const player = room?.players[playerID];
+  if (!room || !player || player.socketID !== socket.id) return;
+
+  delete room.players[playerID];
+  socket.leave(roomID);
+  socket.data.minesRoomID = null;
+  socket.data.minesPlayerID = null;
+
+  if (Object.keys(room.players).length === 0) {
+    delete gameRooms[roomID];
+    return;
+  }
+
+  const allPlayersFinished = Object.values(room.players).every((remainingPlayer) =>
+    ["Blown Up", "Obliterated", "Victory", "Lobby"].includes(remainingPlayer.status)
+  );
+  if (room.state === "In Game" && allPlayersFinished) {
+    room.state = "Lobby";
+    io.to(roomID).emit('round_over', room);
+  }
+  io.to(roomID).emit('room_status_update', room);
+};
+
 io.on('connection', (socket) => {
   console.log(`${socket.id} connected`);
 
-  socket.on('joinGame', ({ roomID, playerID, nickname, status, selectedPowerUp }) => {
+  socket.on('joinGame', ({ roomID, playerID, nickname, status, selectedPowerUp }, acknowledge) => {
+    if (typeof roomID !== 'string' || !roomID.trim() ||
+        typeof playerID !== 'string' || !playerID.trim() ||
+        typeof nickname !== 'string' || !nickname.trim()) {
+      if (typeof acknowledge === 'function') acknowledge({ ok: false, error: "Enter a room name and nickname." });
+      return;
+    }
+
+    const previousRoomID = socket.data.minesRoomID;
+    const previousPlayerID = socket.data.minesPlayerID;
+    if (previousRoomID && previousPlayerID &&
+        (previousRoomID !== roomID || previousPlayerID !== playerID)) {
+      removeMinesPlayer(socket, previousRoomID, previousPlayerID);
+    }
+
     socket.join(roomID);
+    socket.data.minesRoomID = roomID;
+    socket.data.minesPlayerID = playerID;
 
     if (!gameRooms[roomID]) {
       gameRooms[roomID] = {
@@ -144,16 +185,25 @@ io.on('connection', (socket) => {
         powerUp: selectedPowerUp || { type: "None", value: 0 }, 
         status: status || "Lobby",
         nickname: nickname,
-        score: 0
+        score: 0,
+        socketID: socket.id
       };
+    } else {
+      gameRooms[roomID].players[playerID].nickname = nickname;
+      gameRooms[roomID].players[playerID].powerUp = selectedPowerUp || gameRooms[roomID].players[playerID].powerUp;
+      gameRooms[roomID].players[playerID].socketID = socket.id;
     }
 
     io.to(roomID).emit('room_settings_update', gameRooms[roomID]);
+    if (typeof acknowledge === 'function') acknowledge({ ok: true });
   });
 
   socket.on('changeSettings', ({ rows, cols, mines, rounds, selectedPowerUp, roomID, playerID }) => {
     const room = gameRooms[roomID];
-    if (!room || !room.players[playerID]) return;
+    if (!room || !room.players[playerID] ||
+        room.players[playerID].socketID !== socket.id ||
+        socket.data.minesRoomID !== roomID || socket.data.minesPlayerID !== playerID ||
+        room.state !== "Lobby") return;
 
     // Synchronize base room settings
     room.rows = Number(rows);
@@ -175,9 +225,24 @@ io.on('connection', (socket) => {
     io.to(roomID).emit('room_settings_update', room);
   });
 
-  socket.on('startGame', ({ roomID }) => {
+  socket.on('startGame', ({ roomID, playerID }, acknowledge) => {
     const room = gameRooms[roomID];
-    if (!room) return;
+    const fail = (message) => {
+      if (typeof acknowledge === 'function') acknowledge({ ok: false, error: message });
+    };
+    if (!room || !room.players[playerID] || room.players[playerID].socketID !== socket.id ||
+        socket.data.minesRoomID !== roomID || socket.data.minesPlayerID !== playerID) {
+      fail("You are not a member of this Mines room.");
+      return;
+    }
+    if (room.state !== "Lobby") {
+      fail("This room is already playing.");
+      return;
+    }
+    if (Object.values(room.players).some((player) => player.status !== "Lobby")) {
+      fail("All players must return to the lobby before starting a new game.");
+      return;
+    }
 
     room.state = "In Game";
 
@@ -198,6 +263,7 @@ io.on('connection', (socket) => {
       const p = room.players[pid];
 
       p.status = "In Game";
+      p.score = 0;
       p.rows = Number(room.rows);
       p.cols = Number(room.cols);
       
@@ -207,14 +273,19 @@ io.on('connection', (socket) => {
     });
 
     io.to(roomID).emit('start_game', { room });
+    if (typeof acknowledge === 'function') acknowledge({ ok: true });
   });
 
   socket.on('endGame', ({ roomID, playerID, score, status }) => {
     const room = gameRooms[roomID];
-    if (!room || !room.players[playerID]) return;
+    const player = room?.players[playerID];
+    const numericScore = Number(score);
+    if (!room || !player || player.socketID !== socket.id ||
+        socket.data.minesRoomID !== roomID || socket.data.minesPlayerID !== playerID ||
+        !Number.isFinite(numericScore) || numericScore < 0) return;
 
-    room.players[playerID].score += Number(score);
-    room.players[playerID].status = status;
+    player.score = numericScore;
+    player.status = status;
 
     // Check if ALL players in the room have finished their round
     const allPlayersFinished = Object.values(room.players).every((p) => 
@@ -230,17 +301,26 @@ io.on('connection', (socket) => {
   });
 
   socket.on('statusUpdate', ({ roomID, playerID, status }) => {
-    if (gameRooms[roomID]?.players[playerID]) {
-      gameRooms[roomID].players[playerID].status = status;
-      io.to(roomID).emit('room_status_update', gameRooms[roomID]);
+    const room = gameRooms[roomID];
+    const player = room?.players[playerID];
+    if (player && player.socketID === socket.id &&
+        socket.data.minesRoomID === roomID && socket.data.minesPlayerID === playerID) {
+      player.status = status;
+      if (status === "In Game") {
+        room.state = "In Game";
+      } else if (status === "Lobby" &&
+          Object.values(room.players).every((roomPlayer) => roomPlayer.status === "Lobby")) {
+        room.state = "Lobby";
+      }
+      io.to(roomID).emit('room_status_update', room);
     }
   });
 
-  socket.on('resetPoints', ({ roomID, playerID }) => {
-    if (gameRooms[roomID]?.players[playerID]) {
-      gameRooms[roomID].players[playerID].score = 0;
-      io.to(roomID).emit('room_status_update', gameRooms[roomID]);
+  socket.on('leaveGameRoom', ({ roomID, playerID }, acknowledge) => {
+    if (roomID === socket.data.minesRoomID && playerID === socket.data.minesPlayerID) {
+      removeMinesPlayer(socket, roomID, playerID);
     }
+    if (typeof acknowledge === 'function') acknowledge({ ok: true });
   });
 
   socket.on('matchingPairs:joinRoom', (payload = {}, acknowledge) => {
@@ -448,6 +528,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    const minesRoomID = socket.data.minesRoomID;
+    const minesPlayerID = socket.data.minesPlayerID;
+    if (minesRoomID && minesPlayerID) {
+      removeMinesPlayer(socket, minesRoomID, minesPlayerID);
+    }
+
     const roomKey = socket.data.matchingPairsRoomKey;
     const playerID = socket.data.matchingPairsPlayerID;
     if (roomKey && playerID) {
