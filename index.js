@@ -27,7 +27,7 @@ const io = new Server(httpServer, {
 });
 
 const client = new MongoClient(process.env.MONGO_URI);
-const dbName = 'amie_babie';
+const dbName = 'portfolio';
 
 const gameRooms = {};
 const matchingPairsRooms = new Map();
@@ -547,7 +547,7 @@ app.get('/api/events/:sortOrder', async (req, res) => {
   try {
     const sortOrder = req.params.sortOrder;
     const db = client.db(dbName);
-    const events = await db.collection('milestones')
+    const events = await db.collection('Projects')
       .find()
       .sort({ sortDate: sortOrder })
       .toArray();
@@ -565,7 +565,7 @@ app.put('/api/events/:id', async (req, res) => {
     const eventId = req.params.id;
     const updatedSortDate = new Date(`${req.body.date}, ${req.body.year}`);
 
-    const result = await db.collection('milestones').updateOne(
+    const result = await db.collection('Projects').updateOne(
       { _id: new ObjectId(eventId) },
       {
         $set: {
@@ -581,13 +581,13 @@ app.put('/api/events/:id', async (req, res) => {
     );
 
     if (result.matchedCount === 0) {
-      return res.status(404).json({ error: "No milestone found with that ID" });
+      return res.status(404).json({ error: "No project found with that ID" });
     }
 
-    res.json({ success: true, message: "Milestone updated successfully", result });
+    res.json({ success: true, message: "Project updated successfully", result });
   } catch (err) {
     console.error("❌ Backend PUT Error:", err);
-    res.status(500).json({ error: "Failed to update milestone", details: err.message });
+    res.status(500).json({ error: "Failed to update project", details: err.message });
   }
 });
 
@@ -595,7 +595,7 @@ app.post('/api/events', async (req, res) => {
   try {
     const db = client.db(dbName);
     const actualDate = new Date(`${req.body.date}, ${req.body.year}`);
-    const result = await db.collection('milestones')
+    const result = await db.collection('Projects')
       .insertOne({ ...req.body, sortDate: actualDate, createdAt: new Date() });
 
     res.json(result);
@@ -610,18 +610,18 @@ app.delete('/api/events/:id', async (req, res) => {
   try {
     const eventId = req.params.id;
 
-    const result = await db.collection('milestones').deleteOne({
+    const result = await db.collection('Projects').deleteOne({
       _id: new ObjectId(eventId)
     });
 
     if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "No milestone found with that ID" });
+      return res.status(404).json({ error: "No project found with that ID" });
     }
 
-    res.json({ success: true, message: "Memory deleted successfully!" });
+    res.json({ success: true, message: "Project deleted successfully!" });
   } catch (err) {
     console.error("❌ Backend DELETE Error:", err);
-    res.status(500).json({ error: "Failed to delete milestone", details: err.message });
+    res.status(500).json({ error: "Failed to delete project", details: err.message });
   }
 });
 
