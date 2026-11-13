@@ -2,6 +2,7 @@ import express from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
 import cors from 'cors';
 import 'dotenv/config';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 
@@ -13,7 +14,7 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true
 }));
-app.use(express.json());
+app.use(express.json({ limit: '7mb' }));
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -28,6 +29,48 @@ const io = new Server(httpServer, {
 
 const client = new MongoClient(process.env.MONGO_URI);
 const dbName = 'portfolio';
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const imageExtensions = {
+  'image/avif': 'avif',
+  'image/gif': 'gif',
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp'
+};
+
+const requireAdmin = (req, res, next) => {
+  const expectedKey = process.env.ADMIN_KEY;
+  if (!expectedKey) {
+    return res.status(503).json({ error: 'Admin access is not configured on the server.' });
+  }
+
+  const authorization = req.get('authorization') || '';
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  const providedKey = match?.[1].trim();
+  const expectedBuffer = Buffer.from(expectedKey);
+  const providedBuffer = Buffer.from(providedKey || '');
+
+  if (!providedKey || providedBuffer.length !== expectedBuffer.length ||
+      !timingSafeEqual(providedBuffer, expectedBuffer)) {
+    return res.status(401).json({ error: 'Invalid or missing admin key.' });
+  }
+
+  next();
+};
+
+const getGitHubRepository = () => {
+  const repositoryParts = process.env.GITHUB_REPOSITORY?.trim().split('/');
+  const owner = process.env.GITHUB_OWNER?.trim() ||
+    (repositoryParts?.length === 2 ? repositoryParts[0] : '');
+  const repository = process.env.GITHUB_REPO?.trim() ||
+    (repositoryParts?.length === 2 ? repositoryParts[1] : '');
+
+  if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repository)) {
+    return null;
+  }
+
+  return { owner, repository };
+};
 
 const gameRooms = {};
 const matchingPairsRooms = new Map();
@@ -545,7 +588,11 @@ io.on('connection', (socket) => {
 // ROUTES
 app.get('/api/events/:sortOrder', async (req, res) => {
   try {
-    const sortOrder = req.params.sortOrder;
+    const sortOrder = Number(req.params.sortOrder);
+    if (sortOrder !== 1 && sortOrder !== -1) {
+      return res.status(400).json({ error: 'Sort order must be 1 or -1.' });
+    }
+
     const db = client.db(dbName);
     const events = await db.collection('Projects')
       .find()
@@ -559,69 +606,162 @@ app.get('/api/events/:sortOrder', async (req, res) => {
   }
 });
 
-app.put('/api/events/:id', async (req, res) => {
-  const db = client.db(dbName);
-  try {
-    const eventId = req.params.id;
-    const updatedSortDate = new Date(`${req.body.date}, ${req.body.year}`);
+app.post('/api/admin/session', requireAdmin, (req, res) => {
+  res.json({ ok: true });
+});
 
+app.post('/api/admin/images', requireAdmin, async (req, res) => {
+  try {
+    const token = process.env.GITHUB_TOKEN;
+    const githubRepository = getGitHubRepository();
+    if (!token || !githubRepository) {
+      return res.status(503).json({
+        error: 'GitHub image uploads are not configured on the server.'
+      });
+    }
+
+    const { content, contentType } = req.body || {};
+    const extension = imageExtensions[contentType];
+    if (!extension || typeof content !== 'string' ||
+        content.length === 0 ||
+        content.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(content)) {
+      return res.status(400).json({
+        error: 'Provide a valid JPEG, PNG, GIF, WebP, or AVIF image.'
+      });
+    }
+
+    const imageBuffer = Buffer.from(content, 'base64');
+    if (imageBuffer.length === 0 || imageBuffer.length > MAX_IMAGE_BYTES) {
+      return res.status(413).json({ error: 'Images must be 5 MB or smaller.' });
+    }
+
+    const filename = `${randomUUID()}.${extension}`;
+    const imageDirectory = (process.env.GITHUB_IMAGE_DIRECTORY || 'public/images/projects')
+      .split('/')
+      .filter(Boolean);
+    const imagePath = [...imageDirectory, filename].join('/');
+    const encodedPath = imagePath.split('/').map(encodeURIComponent).join('/');
+    const branch = process.env.GITHUB_BRANCH || 'main';
+    const githubUrl = `https://api.github.com/repos/${encodeURIComponent(githubRepository.owner)}` +
+      `/${encodeURIComponent(githubRepository.repository)}/contents/${encodedPath}`;
+
+    const githubResponse = await fetch(githubUrl, {
+      method: 'PUT',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'PortfolioServer',
+        'X-GitHub-Api-Version': '2022-11-28'
+      },
+      body: JSON.stringify({
+        message: `Upload portfolio image ${filename}`,
+        content,
+        branch
+      })
+    });
+
+    const githubResult = await githubResponse.json();
+    if (!githubResponse.ok) {
+      const message = githubResult.message || 'GitHub rejected the image upload.';
+      console.error('GitHub image upload failed:', githubResponse.status, message);
+      return res.status(502).json({ error: message });
+    }
+
+    const url = githubResult.content?.download_url;
+    if (!url) {
+      console.error('GitHub image upload succeeded without a downloadable file URL.');
+      return res.status(502).json({ error: 'GitHub did not return an image URL.' });
+    }
+
+    res.status(201).json({ url });
+  } catch (err) {
+    console.error('GitHub image upload failed:', err);
+    res.status(502).json({ error: 'Could not upload the image to GitHub.' });
+  }
+});
+
+app.put('/api/events/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid project ID.' });
+    }
+
+    const { date, year, shortDesc, fullTitle, story, image } = req.body || {};
+    const updatedSortDate = new Date(`${date}, ${year}`);
+    if (!date || !year || Number.isNaN(updatedSortDate.getTime())) {
+      return res.status(400).json({ error: 'Provide a valid project date and year.' });
+    }
+
+    const db = client.db(dbName);
     const result = await db.collection('Projects').updateOne(
-      { _id: new ObjectId(eventId) },
+      { _id: new ObjectId(req.params.id) },
       {
         $set: {
-          date: req.body.date,
-          year: req.body.year,
-          shortDesc: req.body.shortDesc,
-          fullTitle: req.body.fullTitle,
-          story: req.body.story,
-          image: req.body.image,
+          date,
+          year,
+          shortDesc,
+          fullTitle,
+          story,
+          image,
           sortDate: updatedSortDate
         }
       }
     );
 
     if (result.matchedCount === 0) {
-      return res.status(404).json({ error: "No project found with that ID" });
+      return res.status(404).json({ error: 'No project found with that ID.' });
     }
 
-    res.json({ success: true, message: "Project updated successfully", result });
+    res.json({ success: true, message: 'Project updated successfully.', result });
   } catch (err) {
-    console.error("❌ Backend PUT Error:", err);
-    res.status(500).json({ error: "Failed to update project", details: err.message });
+    console.error('Error updating event:', err);
+    res.status(500).json({ error: 'Failed to update project.' });
   }
 });
 
-app.post('/api/events', async (req, res) => {
+app.post('/api/events', requireAdmin, async (req, res) => {
   try {
+    const { date, year } = req.body || {};
+    const sortDate = new Date(`${date}, ${year}`);
+    if (!date || !year || Number.isNaN(sortDate.getTime())) {
+      return res.status(400).json({ error: 'Provide a valid project date and year.' });
+    }
+
     const db = client.db(dbName);
-    const actualDate = new Date(`${req.body.date}, ${req.body.year}`);
-    const result = await db.collection('Projects')
-      .insertOne({ ...req.body, sortDate: actualDate, createdAt: new Date() });
+    const result = await db.collection('Projects').insertOne({
+      ...req.body,
+      sortDate,
+      createdAt: new Date()
+    });
 
-    res.json(result);
+    res.status(201).json(result);
   } catch (err) {
-    console.error("Error saving event:", err);
-    res.status(500).json({ error: "Failed to save event" });
+    console.error('Error saving event:', err);
+    res.status(500).json({ error: 'Failed to save event.' });
   }
 });
 
-app.delete('/api/events/:id', async (req, res) => {
-  const db = client.db(dbName);
+app.delete('/api/events/:id', requireAdmin, async (req, res) => {
   try {
-    const eventId = req.params.id;
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid project ID.' });
+    }
 
+    const db = client.db(dbName);
     const result = await db.collection('Projects').deleteOne({
-      _id: new ObjectId(eventId)
+      _id: new ObjectId(req.params.id)
     });
 
     if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "No project found with that ID" });
+      return res.status(404).json({ error: 'No project found with that ID.' });
     }
 
-    res.json({ success: true, message: "Project deleted successfully!" });
+    res.json({ success: true, message: 'Project deleted successfully.' });
   } catch (err) {
-    console.error("❌ Backend DELETE Error:", err);
-    res.status(500).json({ error: "Failed to delete project", details: err.message });
+    console.error('Error deleting event:', err);
+    res.status(500).json({ error: 'Failed to delete project.' });
   }
 });
 
