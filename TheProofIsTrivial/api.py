@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import Portfolio.server.TheProofIsTrivial.project as project
+import project
 import google.api_core
 import google.genai as genai
 import os
