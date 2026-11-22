@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import project
+from . import project
 import google.api_core
 import google.genai as genai
 import os
