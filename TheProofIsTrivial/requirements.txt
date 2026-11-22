@@ -1,6 +1,7 @@
 fastapi
 uvicorn
-mysql-connector-python
 pydantic
 google-genai
 google-api-core>=2.19.0
+python-dotenv==1.0.0
+mysql-connector-python>=8.0,<8.1
