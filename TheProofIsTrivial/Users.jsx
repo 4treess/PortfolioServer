@@ -1,4 +1,7 @@
-function AddUser() {
+import React from 'react';
+import { apiFetch } from './src/api.js';
+
+export function AddUser() {
     const [user, setUser] = React.useState("");
     const [feedback, setFeedback] = React.useState("");
 
@@ -6,11 +9,14 @@ function AddUser() {
         e.preventDefault();
         if (!user.trim()) return;
         try {
-            const response = await fetch('http://localhost:8000/AddUser', {
+            const response = await apiFetch('/AddUser', {
                 method: "POST", 
                 headers: {'Content-Type': "application/json"}, 
                 body: JSON.stringify({"username": user})
             });
+            if (!response.ok) {
+                throw new Error(`Account creation failed (${response.status}).`);
+            }
             const success = await response.json();
             setFeedback(success ? "User created! You can now login." : "Username already exists.");
         } catch (error) {
@@ -33,11 +39,11 @@ function AddUser() {
     );
 }
 
-async function DelUser(username) {
+export async function DelUser(username) {
     const user = username
 
         try {
-            const response = await fetch('http://localhost:8000/DelUser', {
+            const response = await apiFetch('/DelUser', {
                 method: "POST", 
                 headers: {'Content-Type': "application/json"}, 
                 body: JSON.stringify({"username": user})

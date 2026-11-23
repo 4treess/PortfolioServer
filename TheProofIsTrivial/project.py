@@ -1,83 +1,67 @@
+import os
+
 import mysql.connector
 from mysql.connector import Error
 
 class Database:
-    def __init__(self, username, password):
-        self.database = None
-        self._username = username
-        self._password = password
-    
-    def connect(self, username: str, password: str):
+    def __init__(self):
+        self._host = os.getenv("TIDB_HOST", "gateway01.us-west-2.prod.aws.tidbcloud.com")
+        self._port = int(os.getenv("TIDB_PORT", "4000"))
+        self._username = os.getenv("TIDB_USER", "")
+        self._password = os.getenv("TIDB_PASSWORD", "")
+        self._database_name = os.getenv("TIDB_DB_NAME", "TheProofIsTrivial")
+        self._ca_path = os.getenv("CA_PATH")
+
+    def connect(self):
+        if not self._username:
+            raise RuntimeError("TIDB_USER is not configured.")
+
+        connection_options = {
+            "host": self._host,
+            "port": self._port,
+            "user": self._username,
+            "password": self._password,
+            "database": self._database_name,
+            "autocommit": True,
+            "use_pure": True,
+            "ssl_verify_cert": True,
+            "ssl_verify_identity": True,
+        }
+        if self._ca_path:
+            connection_options["ssl_ca"] = self._ca_path
+
         try:
-            self.database = mysql.connector.connect(
-                host='gateway01.us-west-2.prod.aws.tidbcloud.com',
-                port=4000,
-                user=username,
-                password=password,
-                database='TheProofIsTrivial',
-                autocommit=True,
-                use_pure=True,
-                ssl_verify_cert=True,
-                ssl_verify_identity=True,
-                ssl_ca='/etc/ssl/certs/ca-certificates.crt'
-            )
-        
+            return mysql.connector.connect(**connection_options)
         except Error as e:
-            raise Exception(e)
+            raise RuntimeError("Could not connect to TiDB.") from e
 
+    def check_connection(self):
+        try:
+            with self.connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+        except Error as e:
+            raise RuntimeError("TiDB health check failed.") from e
 
-    def disconnect(self):
-        if self.database is None:
-            raise Exception ("Error in disconnectFromDatabase: Database is None type")
-    
-        if(self.database.is_connected() == False):
-            raise Exception ("Error in disconnectFromDatabase: Database was not connected")
-    
-        self.database.close()
-        self.database = None
-    
-        return True
-    
-    
     def _retrieve(self, query, params):
-        output = None
         try:
-            if self.database == None:
-                self.connect(self._username, self._password)
-                
-            cursor = self.database.cursor(dictionary = True)
-            cursor.execute(query, params)
-            output = cursor.fetchall()
-        
+            with self.connect() as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    cursor.execute(query, params)
+                    return cursor.fetchall()
         except Error as e:
-            print("Error: ", e)
-            
-        finally:
-            cursor.close()
-            self.disconnect()
-        
-        return output
+            raise RuntimeError("TiDB query failed.") from e
 
-    
     def _update(self, query, params):
-        output = False
         try:
-            if self.database == None:
-                self.connect(self._username, self._password)
-                
-            cursor = self.database.cursor()
-            cursor.execute(query, params)
-            self.database.commit()
-            output = True
-        
+            with self.connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, params)
+                    connection.commit()
+                    return True
         except Error as e:
-            print("Error: ", e)
-        
-        finally:
-            cursor.close()
-            self.disconnect()
-    
-        return output
+            raise RuntimeError("TiDB update failed.") from e
     
     def retrieveProof(self, input):
         query = "SELECT * FROM Proofs WHERE proposition = %(proposition)s;"

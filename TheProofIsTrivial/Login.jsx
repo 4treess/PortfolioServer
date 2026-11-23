@@ -1,11 +1,14 @@
-function Login({ onLoginSuccess }) {
+import React from 'react';
+import { apiFetch } from './src/api.js';
+
+export function Login({ onLoginSuccess }) {
     const [user, setUser] = React.useState(""); 
     const [feedback, setFeedback] = React.useState("");
 
     async function getWebData(e) {
         e.preventDefault();
         try {
-            const response = await fetch(`http://localhost:8000/Login/${user}`);
+            const response = await apiFetch(`/Login/${encodeURIComponent(user)}`);
             if (response.ok) {
                 const data = await response.json();
                 if (data && data[0]?.Count > 0) {
@@ -13,6 +16,8 @@ function Login({ onLoginSuccess }) {
                 } else {
                     setFeedback("Invalid Username! If you havent logged in before, please sign up!");
                 }
+            } else {
+                setFeedback("The server could not process your login.");
             }
         } catch (error) {
             setFeedback("The server is currently experiencing non-trivial problems.");

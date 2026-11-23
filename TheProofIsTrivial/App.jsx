@@ -1,4 +1,9 @@
-function App() {
+import React from 'react';
+import { Login } from './Login.jsx';
+import { AddUser } from './Users.jsx';
+import { GetProof, GetProofs } from './Proofs.jsx';
+
+export default function App() {
     const [view, setView] = React.useState('generate');
     const [username, setUsername] = React.useState("\0");
 

@@ -1,9 +1,14 @@
-function Latex({ math }) {
+import React from 'react';
+import renderMathInElement from 'katex/contrib/auto-render';
+import { apiFetch } from './src/api.js';
+import { DelUser } from './Users.jsx';
+
+export function Latex({ math }) {
   const containerRef = React.useRef(null);
 
   React.useEffect(() => {
-    if (containerRef.current && window.renderMathInElement) {
-      window.renderMathInElement(containerRef.current, {
+    if (containerRef.current) {
+      renderMathInElement(containerRef.current, {
         delimiters: [
           { left: '$$', right: '$$', display: true },
           { left: '$', right: '$', display: false },
@@ -25,7 +30,7 @@ function Latex({ math }) {
   );
 }
 
-function GetProof({ username, setUsername, view, setView }) {
+export function GetProof({ username, setUsername, view, setView }) {
     const [proofs, setProofs] = React.useState([]);
     const [proposition, setProposition] = React.useState("");
     const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
@@ -33,12 +38,14 @@ function GetProof({ username, setUsername, view, setView }) {
     async function getWebData(e) {
         e.preventDefault();
         try {
-            const response = await fetch(`http://localhost:8000/Proof/${proposition}`);
+            const response = await apiFetch(`/Proof/${encodeURIComponent(proposition)}`);
+            if (!response.ok) throw new Error(`Proof lookup failed (${response.status}).`);
             let data = await response.json();
             if(Array.isArray(data) && data.length === 0){
                 const successful = await AddProof(proposition, username)
                 if (successful){
-                    const response = await fetch(`http://localhost:8000/Proof/${proposition}`);
+                    const response = await apiFetch(`/Proof/${encodeURIComponent(proposition)}`);
+                    if (!response.ok) throw new Error(`Proof lookup failed (${response.status}).`);
                     data = await response.json();
                 }
             }
@@ -161,7 +168,7 @@ function GetProof({ username, setUsername, view, setView }) {
     );
 }
 
-function GetProofs({ username, setUsername, view, setView }) {
+export function GetProofs({ username, setUsername, view, setView }) {
     const [proofs, setProofs] = React.useState([]);
     const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
 
@@ -173,7 +180,8 @@ function GetProofs({ username, setUsername, view, setView }) {
 
     async function fetchAll() {
         try {
-            const response = await fetch(`http://localhost:8000/Proofs/${username}`);
+            const response = await apiFetch(`/Proofs/${encodeURIComponent(username)}`);
+            if (!response.ok) throw new Error(`Proof list failed (${response.status}).`);
             const data = await response.json();
             setProofs(Array.isArray(data) ? data : []);
         } catch (error) { 
@@ -281,7 +289,7 @@ async function AddProof(proposition, username) {
     let tempData = 0;
 
     try {
-        const response = await fetch('http://localhost:8000/Proof', {method: "POST", headers: {'Content-Type': "application/json"}, body: JSON.stringify({"proposition": proposition, "result": "", "creator": username})});
+        const response = await apiFetch('/Proof', {method: "POST", headers: {'Content-Type': "application/json"}, body: JSON.stringify({"proposition": proposition, "result": "", "creator": username})});
         if(response.ok){
             tempData = await response.json();
             console.log("Retrieved The following from the server: ", tempData);
@@ -299,7 +307,7 @@ async function DelProof(proof, username) {
     let tempData = 0;
 
     try {
-        const response = await fetch('http://localhost:8000/DelProof', {method: "POST", headers: {'Content-Type': "application/json"}, body: JSON.stringify({"proposition": proof, "result": "", "creator": username})});
+        const response = await apiFetch('/DelProof', {method: "POST", headers: {'Content-Type': "application/json"}, body: JSON.stringify({"proposition": proof, "result": "", "creator": username})});
         if(response.ok){
             tempData = await response.json();
             console.log("Retrieved The following from the server: ", tempData);
