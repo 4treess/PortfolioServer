@@ -34,26 +34,74 @@ export function GetProof({ username, setUsername, view, setView }) {
     const [proofs, setProofs] = React.useState([]);
     const [proposition, setProposition] = React.useState("");
     const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
+    const [isGenerating, setIsGenerating] = React.useState(false);
+    const [generationStatus, setGenerationStatus] = React.useState("");
+    const [retryCountdown, setRetryCountdown] = React.useState(null);
+
+    async function addProofWithRetry(proofProposition, proofUsername) {
+        let retryCount = 0;
+
+        while (true) {
+            try {
+                return await AddProof(proofProposition, proofUsername);
+            } catch (error) {
+                if (!(error instanceof Error) || ![429, 503].includes(error.status)) {
+                    throw error;
+                }
+
+                const delaySeconds = Math.min(2 ** retryCount, 30);
+                retryCount += 1;
+                const reason = error.status === 429
+                    ? "rate-limited"
+                    : "temporarily unavailable";
+                setGenerationStatus(`Gemini is ${reason}. Retrying automatically.`);
+
+                for (let remaining = delaySeconds; remaining > 0; remaining -= 1) {
+                    setRetryCountdown(remaining);
+                    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+                }
+
+                setRetryCountdown(null);
+                setGenerationStatus("Retrying proof generation...");
+            }
+        }
+    }
 
     async function getWebData(e) {
         e.preventDefault();
+        if (isGenerating) return;
+
+        setIsGenerating(true);
+        setGenerationStatus("Checking for an existing proof...");
+        setRetryCountdown(null);
+
         try {
             const response = await apiFetch(`/Proof/${encodeURIComponent(proposition)}`);
             if (!response.ok) throw new Error(`Proof lookup failed (${response.status}).`);
             let data = await response.json();
-            if(Array.isArray(data) && data.length === 0){
-                const successful = await AddProof(proposition, username)
-                if (successful){
+            if (Array.isArray(data) && data.length === 0) {
+                const successful = await addProofWithRetry(proposition, username);
+                if (successful) {
                     const response = await apiFetch(`/Proof/${encodeURIComponent(proposition)}`);
                     if (!response.ok) throw new Error(`Proof lookup failed (${response.status}).`);
                     data = await response.json();
+                    setGenerationStatus("Proof generated successfully.");
+                } else {
+                    setGenerationStatus("Proof generation did not complete.");
                 }
+            } else {
+                setGenerationStatus("Loaded saved proof.");
             }
 
             setProofs(data);
-
         } catch (error) {
             console.error("Fetch error", error);
+            setGenerationStatus(
+                error instanceof Error ? error.message : "The proof request failed."
+            );
+        } finally {
+            setIsGenerating(false);
+            setRetryCountdown(null);
         }
     }
 
@@ -69,7 +117,7 @@ export function GetProof({ username, setUsername, view, setView }) {
     return (
         <div className="app-wrapper">
       <nav>
-        <div className="logo">S imply Z || The Proof is Trivial</div>
+        <div className="logo">Trevor De Clark || The Proof is Trivial</div>
         <ul className="nav-links">
           <li><a href="#" className={view === 'generate' ? 'active-page' : ''} 
             onClick={(e) => { e.preventDefault(); setView('generate'); }}>Generate Proof</a></li>
@@ -121,13 +169,20 @@ export function GetProof({ username, setUsername, view, setView }) {
           <textarea
             value={proposition}
             onChange={(e) => setProposition(e.target.value)}
-            placeholder="e.g., a|b&&b|c=>a|c"
+            placeholder="e.g., Let T and G be graphs, where G is a connected subgraph of T. If T is a tree than G must also be a tree"
           />
 
           <div className="btn-container">
-            <button id="generateBtn" onClick={getWebData}>
-              Trivialize the Proof
+            <button id="generateBtn" onClick={getWebData} disabled={isGenerating}>
+              {isGenerating ? "Generating..." : "Trivialize the Proof"}
             </button>
+            {generationStatus && (
+              <p className="status-msg" role="status" aria-live="polite">
+                {generationStatus}
+                {retryCountdown !== null &&
+                  ` Retrying in ${retryCountdown} second${retryCountdown === 1 ? "" : "s"}.`}
+              </p>
+            )}
           </div>
 
           <div className="output-container">
@@ -208,7 +263,7 @@ export function GetProofs({ username, setUsername, view, setView }) {
     return (
         <div className="app-wrapper">
             <nav>
-                <div className="logo">S imply Z || The Proof is Trivial</div>
+                <div className="logo">Trevor De Clark || The Proof is Trivial</div>
                 <ul className="nav-links">
                     <li><a href="#" className={view === 'generate' ? 'active-page' : ''} 
                         onClick={(e) => { e.preventDefault(); setView('generate'); }}>Generate Proof</a></li>
@@ -286,21 +341,27 @@ export function GetProofs({ username, setUsername, view, setView }) {
 }
 
 async function AddProof(proposition, username) {
-    let tempData = 0;
+    const response = await apiFetch('/Proof', {
+        method: "POST",
+        headers: {'Content-Type': "application/json"},
+        body: JSON.stringify({"proposition": proposition, "result": "", "creator": username})
+    });
 
-    try {
-        const response = await apiFetch('/Proof', {method: "POST", headers: {'Content-Type': "application/json"}, body: JSON.stringify({"proposition": proposition, "result": "", "creator": username})});
-        if(response.ok){
-            tempData = await response.json();
-            console.log("Retrieved The following from the server: ", tempData);
-        } else {
-            console.error("Error Connecting to server: ", response.status);
+    if (!response.ok) {
+        let detail;
+        if (response.headers.get("content-type")?.includes("application/json")) {
+            const data = await response.json();
+            detail = data.detail;
         }
-    } catch (error) {
-        console.error("Could not connect to the server! ", error);
+        const message = typeof detail === "string"
+            ? detail
+            : `Proof generation failed (${response.status}).`;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
     }
 
-    return tempData
+    return response.json();
 }
 
 async function DelProof(proof, username) {

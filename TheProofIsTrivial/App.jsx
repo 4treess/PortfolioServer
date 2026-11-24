@@ -25,7 +25,7 @@ export default function App() {
     return (
         <div className="app-wrapper">
             <nav>
-                <div className="logo">S imply Z || The Proof is Trivial</div>
+                <div className="logo">Trevor De Clark || The Proof is Trivial</div>
             </nav>
 
             <div className="container">
