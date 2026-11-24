@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from .project import project
+from . import project
 import google.genai as genai
 from google.genai.errors import APIError
 
